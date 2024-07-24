@@ -1,10 +1,12 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
 using System.Runtime.Versioning;
 using System.Windows;
 using System.Windows.Documents;
 using System.Windows.Forms;
+using CommandLine;
 using EasyFramework;
 using OpenVROverlayPipe.Properties;
 using Application = System.Windows.Application;
@@ -22,12 +24,20 @@ namespace OpenVROverlayPipe
         private readonly MainController _controller;
         private readonly Settings _settings = Settings.Default;
         private readonly GraphicsSingleton _graphics = GraphicsSingleton.Instance;
+        private CommandLineOptions _parameters = new();
+
 
         public MainWindow()
         {
+            // Parse command line arguments
+            var args = Environment.GetCommandLineArgs();
+            Parser.Default.ParseArguments<CommandLineOptions>(args)
+                .WithParsed<CommandLineOptions>(opts => _parameters = opts)
+                .WithNotParsed<CommandLineOptions>(HandleParseError);
+            
             InitializeComponent();
             
-            if (!_settings.LaunchMinimized) {
+            if (!_settings.LaunchMinimized && !_parameters.IgnoreUi && !_parameters.Minimized) {
                 // Position in last known location, unless negative, then center on screen.
                 var wa = Screen.PrimaryScreen?.WorkingArea;
                 var b = Screen.PrimaryScreen?.Bounds;
@@ -53,7 +63,8 @@ namespace OpenVROverlayPipe
                 this, 
                 Properties.Resources.Icon.Clone() as Icon,
                 Properties.Resources.AppName,
-                Properties.Resources.Version
+                Properties.Resources.Version,
+                _parameters.ClickUrl
             );
             Title = Properties.Resources.AppName;
 
@@ -64,58 +75,31 @@ namespace OpenVROverlayPipe
             LabelVersion.Content = Properties.Resources.Version;
 #endif
             // Controller
-            _controller = new MainController((status, value) => {
-                Dispatcher.Invoke(() =>
+            _controller = new MainController(
+                !_parameters.DisableWebSocket,
+                _parameters.PipeName,
+                _parameters.DontRegisterManifest,
+                (status, value) =>
                 {
-                    switch (status)
-                    {
-                        case SuperServer.ServerStatus.Connected:
-                            LabelServerStatus.Background = Brushes.OliveDrab;
-                            LabelServerStatus.Content = "Online";
-                            break;
-                        case SuperServer.ServerStatus.Disconnected:
-                            LabelServerStatus.Background = Brushes.Tomato;
-                            LabelServerStatus.Content = "Offline";
-                            break;
-                        case SuperServer.ServerStatus.Error:
-                            LabelServerStatus.Background = Brushes.Gray;
-                            LabelServerStatus.Content = "Error";
-                            break;
-                        case SuperServer.ServerStatus.ReceivedCount:
-                            LabelHandledRequests.Content = value;
-                            break;
-                        case SuperServer.ServerStatus.SessionCount:
-                            LabelConnectedClients.Content = value;
-                            break;                            
-                    }
-                });
-            },
-                (status) => {
-                    Dispatcher.Invoke(() => {
-                        if (status)
-                        {
-                            LabelOpenVrStatus.Background = Brushes.OliveDrab;
-                            LabelOpenVrStatus.Content = "Connected";
-                        }
-                        else
-                        {
-                            LabelOpenVrStatus.Background = Brushes.Tomato;
-                            LabelOpenVrStatus.Content = "Disconnected";
-                            if (_settings.ExitWithSteam)
-                            {
-                                _controller?.Shutdown();
-                                WindowUtils.DestroyTrayIcon();
-                                Application.Current.Shutdown();
-                            }
-                        }
-                    });
+                    if (_parameters.IgnoreUi) return;
+                    Dispatcher.Invoke(() => { UpdateWSServerStatus(status, value); });
+                },
+                (status, value) =>
+                {
+                    if (_parameters.IgnoreUi) return;
+                    Dispatcher.Invoke(() => { UpdatePipeClientStatus(status, value); });
+                },
+                (status) =>
+                {
+                    if (_parameters.IgnoreUi) return;
+                    Dispatcher.Invoke(() => { UpdateOpenVrStatus(status); });
                 }
             );
 
             GraphicsCompanion.StartOpenTk(this);
             _controller.SetPort(_settings.Port);
 
-            if (_settings.LaunchMinimized)
+            if (_settings.LaunchMinimized || _parameters.Minimized) 
             {
                 Loaded += (sender, args) =>
                 {
@@ -151,6 +135,81 @@ namespace OpenVROverlayPipe
             CheckBoxExitWithSteamVr.IsChecked = _settings.ExitWithSteam;
             TextBoxPort.Text = _settings.Port.ToString();
         }
+        
+        private void HandleParseError(IEnumerable<Error> errs)
+        {
+            foreach (var error in errs)
+            {
+                Console.WriteLine(error.ToString());
+            }
+        }
+        
+        private void UpdateWSServerStatus(SuperServer.ServerStatus status, int value)
+        {
+            switch (status)
+            {
+                case SuperServer.ServerStatus.Connected:
+                    LabelServerStatus.Background = Brushes.OliveDrab;
+                    LabelServerStatus.Content = "Online";
+                    break;
+                case SuperServer.ServerStatus.Disconnected:
+                    LabelServerStatus.Background = Brushes.Tomato;
+                    LabelServerStatus.Content = "Offline";
+                    break;
+                case SuperServer.ServerStatus.Error:
+                    LabelServerStatus.Background = Brushes.Gray;
+                    LabelServerStatus.Content = "Error";
+                    break;
+                case SuperServer.ServerStatus.ReceivedCount:
+                    LabelHandledRequests.Content = value;
+                    break;
+                case SuperServer.ServerStatus.SessionCount:
+                    LabelConnectedClients.Content = value;
+                    break;
+            }
+        }
+        
+        private void UpdatePipeClientStatus(NamedPipeClient.NamedPipeClientStatus status, int value)
+        {
+            switch (status)
+            {
+                case NamedPipeClient.NamedPipeClientStatus.Connected:
+                    LabelPipeClientStatus.Background = Brushes.OliveDrab;
+                    LabelPipeClientStatus.Content = "Connected";
+                    break;
+                case NamedPipeClient.NamedPipeClientStatus.Disconnected:
+                    LabelPipeClientStatus.Background = Brushes.Tomato;
+                    LabelPipeClientStatus.Content = "Disconnected";
+                    break;
+                case NamedPipeClient.NamedPipeClientStatus.Error:
+                    LabelPipeClientStatus.Background = Brushes.Gray;
+                    LabelPipeClientStatus.Content = "Error";
+                    break;
+                case NamedPipeClient.NamedPipeClientStatus.ReceivedCount:
+                    LabelHandledRequests.Content = value;
+                    break;
+            }
+        }
+        
+        private void UpdateOpenVrStatus(bool status)
+        {
+            if (status)
+            {
+                LabelOpenVrStatus.Background = Brushes.OliveDrab;
+                LabelOpenVrStatus.Content = "Connected";
+            }
+            else
+            {
+                LabelOpenVrStatus.Background = Brushes.Tomato;
+                LabelOpenVrStatus.Content = "Disconnected";
+                if (_settings.ExitWithSteam && _parameters.DontExitWithSteamVR != true)
+                {
+                    _controller?.Shutdown();
+                    WindowUtils.DestroyTrayIcon();
+                    Application.Current.Shutdown();
+                }
+            }
+        }
 
         #region interface
         private void Button_Edit_Click(object sender, RoutedEventArgs e)
@@ -161,7 +220,7 @@ namespace OpenVROverlayPipe
             };
             dlg.ShowDialog();
             var result = dlg.DialogResult;
-            if(result == true)
+            if (result == true)
             {
                 _settings.Port = dlg.value;
                 _settings.Save();
